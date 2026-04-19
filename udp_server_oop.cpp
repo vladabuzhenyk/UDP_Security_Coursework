@@ -2,12 +2,14 @@
 #include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <sys/wait.h> 
+#include <thread>
 #include <vector>
-#include <signal.h>
+#include <mutex>
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
+
+std::mutex console_mutex; // М'ютекс для синхронізації виводу в консоль
 
 class ServerUDP {
 private:
@@ -17,6 +19,7 @@ private:
 
 public:
     ServerUDP(int port = PORT) {
+        // Створення UDP сокета (SOCK_DGRAM)
         sockfd = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd < 0) throw std::runtime_error("Помилка створення сокета");
 
@@ -25,18 +28,16 @@ public:
         server_addr.sin_addr.s_addr = INADDR_ANY;
         server_addr.sin_port = htons(port);
 
+        // Прив'язка сокета до порту
         if (bind(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0)
-            throw std::runtime_error("Помилка прив'язки");
-
-        // Автоматичне очищення завершених процесів (запобігання зомбі)
-        signal(SIGCHLD, SIG_IGN); 
+            throw std::runtime_error("Помилка прив'язки (bind)");
 
         running = true;
-        std::cout << "UDP сервер (Multiprocessing) запущено на порту " << port << std::endl;
+        std::cout << "UDP сервер (Multithreading) запущено на порту " << port << std::endl;
     }
 
-    ~ServerUDP() {
-        close(sockfd);
+    ~ServerUDP() { 
+        close(sockfd); // Принцип RAII: закриття ресурсу в деструкторі
     }
 
     void start() {
@@ -50,27 +51,24 @@ public:
                                  (struct sockaddr*)&client_addr, &addr_len);
             
             if (n > 0) {
-                pid_t pid = fork(); // СТВОРЕННЯ НОВОГО ПРОЦЕСУ
-
-                if (pid < 0) {
-                    std::cerr << "Помилка створення процесу" << std::endl;
-                } else if (pid == 0) {
-                    // Це ДОЧІРНІЙ ПРОЦЕС
-                    handle_client(std::string(buffer), client_addr);
-                    exit(0);
-                }
+                // Створення нового потоку для обробки повідомлення
+                // Це дозволяє серверу миттєво повернутися до recvfrom()
+                std::thread t(&ServerUDP::handle_client, this, std::string(buffer), client_addr);
+                t.detach(); // Від'єднуємо потік, щоб він працював незалежно
             }
         }
     }
 
 private:
-    void handle_client(const std::string &message, sockaddr_in client_addr) {
+    void handle_client(const std::string message, sockaddr_in client_addr) {
+        // Блокуємо консоль м'ютексом, щоб повідомлення від різних потоків не перемішувалися
+        std::lock_guard<std::mutex> lock(console_mutex);
+        
         std::string client_ip = inet_ntoa(client_addr.sin_addr);
         int client_port = ntohs(client_addr.sin_port);
         
-        std::cout << "[Процес PID " << getpid() << "] Отримано від " 
+        std::cout << "[Потік ID: " << std::this_thread::get_id() << "] "
                   << client_ip << ":" << client_port << " -> " << message << std::endl;
-        
     }
 };
 
@@ -79,7 +77,7 @@ int main() {
         ServerUDP server;
         server.start();
     } catch (const std::exception &e) {
-        std::cerr << e.what() << std::endl;
+        std::cerr << "Критична помилка: " << e.what() << std::endl;
     }
     return 0;
 }
